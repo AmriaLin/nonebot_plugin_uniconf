@@ -191,3 +191,76 @@ async def test_add_directory_ignores_sibling_prefix(app: App):
     await manager._dispatch({(watchfiles.Change.added, str(d / "data" / "x.txt"))})
     assert hits == [d / "data"]
     _reset(manager)
+
+
+@pytest.mark.asyncio
+async def test_duplicate_registration_keeps_single_entry(app: App, tmp_path: Path):
+    """同一 (插件, 路径) 重复注册应合并为一条，避免一次变更触发重复回调"""
+    from nonebot_plugin_uniconf.manager import UniConfigManager
+
+    manager = UniConfigManager()
+    _reset(manager)
+    target = tmp_path / "notes.txt"
+
+    await manager._add_watch_path("dup", target, lambda c: True, _noop)
+    await manager._add_watch_path("dup", target, lambda c: True, _noop)
+
+    entries = [e for e in manager._watch_entries if e.path == target]
+    assert len(entries) == 1
+    assert entries[0].callbacks == (_noop,)
+
+    if manager._watcher_task is not None:
+        manager._watcher_task.cancel()
+        with contextlib.suppress(BaseException):
+            await manager._watcher_task
+    _reset(manager)
+
+
+@pytest.mark.asyncio
+async def test_duplicate_registration_merges_callbacks(app: App, tmp_path: Path):
+    """重复注册带不同回调时应合并，且每条回调只触发一次"""
+    from nonebot_plugin_uniconf.manager import UniConfigManager
+
+    manager = UniConfigManager()
+    _reset(manager)
+    target = tmp_path / "notes.txt"
+    hits: list = []
+
+    async def _cb1(owner: str, path: Path) -> None:
+        hits.append("cb1")
+
+    async def _cb2(owner: str, path: Path) -> None:
+        hits.append("cb2")
+
+    await manager._add_watch_path("dup", target, lambda c: True, _cb1)
+    await manager._add_watch_path("dup", target, lambda c: True, _cb2)
+
+    entries = [e for e in manager._watch_entries if e.path == target]
+    assert len(entries) == 1
+    assert set(entries[0].callbacks) == {_cb1, _cb2}
+
+    await manager._dispatch({(watchfiles.Change.modified, str(target))})
+    assert hits == ["cb1", "cb2"]
+
+    if manager._watcher_task is not None:
+        manager._watcher_task.cancel()
+        with contextlib.suppress(BaseException):
+            await manager._watcher_task
+    _reset(manager)
+
+
+@pytest.mark.asyncio
+async def test_add_file_twice_registers_once(app: App):
+    """add_file 重复调用同一文件名时只应保留一条监控"""
+    from nonebot_plugin_uniconf.manager import UniConfigManager
+
+    manager = UniConfigManager()
+    _reset(manager)
+    owner = "test_add_file_twice"
+    d = _fresh_dir(owner)
+    await manager.add_file("notes.txt", "hello", watch=True, owner_name=owner)
+    await manager.add_file("notes.txt", "hello", watch=True, owner_name=owner)
+
+    target = (d / "notes.txt").resolve()
+    assert [e.path for e in manager._watch_entries].count(target) == 1
+    _reset(manager)

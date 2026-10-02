@@ -682,15 +682,32 @@ class UniConfigManager(Generic[T]):
         不再为每个路径单独启动监控任务，而是把注册项写入全局注册表，
         由唯一的 watcher 任务统一监控、串行派发。
 
+        注册键为 ``(plugin_name, path)``：同一路径被重复注册时不会追加新条目，
+        而是把新的回调并入已有条目，避免一次文件变更触发重复回调。
+
         Args:
             plugin_name (str): 插件名称
             path (Path): 路径
             filter (FILTER_TYPE): 过滤函数
             *callbacks (CALLBACK_TYPE): 回调函数列表
         """
-        self._watch_entries.append(
-            _WatchEntry(plugin_name, Path(path), filter, tuple(callbacks))
-        )
+        target = Path(path)
+        for index, existing in enumerate(self._watch_entries):
+            if existing.plugin_name == plugin_name and existing.path == target:
+                merged = existing.callbacks + tuple(
+                    cb for cb in callbacks if cb not in existing.callbacks
+                )
+                if merged == existing.callbacks:
+                    # 已注册且没有新增回调，无需重启 watcher
+                    return
+                self._watch_entries[index] = _WatchEntry(
+                    plugin_name, target, existing.filter, merged
+                )
+                break
+        else:
+            self._watch_entries.append(
+                _WatchEntry(plugin_name, target, filter, tuple(callbacks))
+            )
         self._watch_dirty.set()
         # 已有 watcher 正在运行，通知它带上新的路径集合重启
         if self._watch_stop is not None:
